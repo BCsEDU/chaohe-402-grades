@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
+  <title>學生成績管理系統</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <span class="app-glyph" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            <path d="M9 8h6M9 12h4" />
+          </svg>
+        </span>
+        <div>
+          <div class="brand-title-row">
+            <h1>學生成績管理系統</h1>
+            <span id="hdr-class-badge" class="badge badge-blue">402 班</span>
+            <span id="hdr-seat-badge" class="badge badge-neutral">1~29 號（29 號為測試座號）</span>
+          </div>
+          <div id="hdr-semester-sub" class="brand-sub">115 學年度第 1 學期 · 本機即時儲存</div>
+        </div>
+      </div>
+
+      <div class="hdr-actions">
+        <button id="btn-enter-helper-mode" type="button" class="btn btn-secondary btn-sm">👩‍🎓 學生協助模式</button>
+        <button id="btn-toggle-privacy" type="button" class="btn btn-secondary btn-sm">👁️ 隱藏姓名</button>
+        <button id="btn-quick-import" type="button" class="btn btn-soft btn-sm">⬆️ CSV 上傳</button>
+        <button id="btn-quick-export" type="button" class="btn btn-primary btn-sm">⬇️ CSV 匯出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-container">
+    <div id="helper-mode-banner" class="helper-banner hidden no-print">
+      <div>
+        <strong>👩‍🎓 學生協助登打模式中</strong>
+        <span class="helper-banner-desc">僅開放：選擇科目、新增考試項目、輸入未鎖定欄位成績（其餘功能與已鎖定欄位皆已鎖定）</span>
+      </div>
+      <button id="btn-exit-helper-mode" type="button" class="btn btn-sm btn-primary">🔓 教師解除模式</button>
+    </div>
+
+    <div id="tabs-wrap" class="tabs-wrap no-print">
+      <nav class="tabs-bar" aria-label="主要功能分頁">
+        <button type="button" class="tab-btn active" data-tab="entry">📝 成績登錄</button>
+        <button type="button" class="tab-btn" data-tab="overview">📊 全科總覽</button>
+        <button type="button" class="tab-btn" data-tab="import">⬆️ CSV 上傳</button>
+        <button type="button" class="tab-btn" data-tab="export">⬇️ CSV 匯出</button>
+        <button type="button" class="tab-btn" data-tab="settings">⚙️ 班級設定</button>
+      </nav>
+    </div>
+
+    <div id="global-undo-banner" class="undo-banner hidden no-print">
+      <span id="global-undo-text"></span>
+      <button id="btn-undo-snapshot" type="button" class="btn btn-sm btn-secondary">↩️ 復原操作</button>
+    </div>
+
+    <!-- 分頁 1：單科成績登錄 -->
+    <section id="tab-entry" class="tab-panel">
+      <div class="card toolbar-card no-print">
+        <div class="subject-pills" id="subject-pills"></div>
+        <div class="toolbar-subrow">
+          <div class="seg-filter" id="category-filter">
+            <button type="button" class="seg-btn active" data-cat="all">全部</button>
+            <button type="button" class="seg-btn" data-cat="quiz">小考</button>
+            <button type="button" class="seg-btn" data-cat="midterm">期中考</button>
+            <button type="button" class="seg-btn" data-cat="final">期末考</button>
+          </div>
+          <div class="toolbar-actions">
+            <button id="btn-add-quiz" type="button" class="btn btn-primary btn-sm">＋ 新增小考</button>
+            <button id="btn-add-assessment" type="button" class="btn btn-secondary btn-sm">＋ 新增評量</button>
+            <button id="btn-fill-test-seat" type="button" class="btn btn-secondary btn-sm">🧪 29號測試分數</button>
+            <label id="wrap-include-test-stats" class="toggle-chip" title="切換班級平均與統計是否納入 29 號測試座號">
+              <input type="checkbox" id="chk-include-test-stats" />
+              <span>統計含29號</span>
+            </label>
+            <button id="btn-export-current-subject" type="button" class="btn btn-soft btn-sm">⬇️ 匯出此科 CSV</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card table-card">
+        <div class="table-head-bar">
+          <div>
+            <h2 id="entry-table-title" class="section-title">國語成績表</h2>
+            <div id="entry-stats-strip" class="stats-strip"></div>
+          </div>
+          <div class="table-legend">
+            <span id="entry-table-hint" class="section-hint">按 <kbd>Enter</kbd> / <kbd>↓</kbd> 跳下一號；輸入 <code>缺</code>=缺考、<code>免</code>=免考；點 🔓 可鎖定直欄防誤觸</span>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table id="grade-entry-table" class="data-table"></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 分頁 2：全科總覽 -->
+    <section id="tab-overview" class="tab-panel hidden">
+      <div class="card toolbar-card no-print">
+        <div class="toolbar-subrow">
+          <div class="seg-filter" id="overview-metric-tabs">
+            <button type="button" class="seg-btn active" data-metric="subjectAvg">科目平均</button>
+            <button type="button" class="seg-btn" data-metric="quiz">小考平均</button>
+            <button type="button" class="seg-btn" data-metric="midterm">期中考</button>
+            <button type="button" class="seg-btn" data-metric="final">期末考</button>
+          </div>
+          <div class="toolbar-actions">
+            <label class="toggle-chip">
+              <input type="checkbox" id="chk-overview-only-alert" />
+              <span>只看需關注（&lt;60分或缺考）</span>
+            </label>
+            <button id="btn-print-overview" type="button" class="btn btn-secondary btn-sm">🖨️ 列印總表</button>
+            <button id="btn-export-overview-now" type="button" class="btn btn-primary btn-sm">⬇️ 匯出全科總表 CSV</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card table-card">
+        <div class="table-head-bar">
+          <div>
+            <h2 class="section-title">1~29 號全科成績總表</h2>
+            <div id="overview-stats-strip" class="stats-strip"></div>
+          </div>
+          <span class="section-hint">點擊任一位學生可查看 6 科詳細分數與列印通知單</span>
+        </div>
+        <div class="table-scroll">
+          <table id="overview-table" class="data-table"></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 分頁 3：CSV 快速上傳 -->
+    <section id="tab-import" class="tab-panel hidden">
+      <div class="import-layout">
+        <div class="card">
+          <h2 class="section-title">上傳 CSV 或貼上試算表快速登錄成績</h2>
+          <p class="section-hint" style="margin-bottom: 14px;">
+            支援 UTF-8 與台灣 Excel Big5 編碼，也可直接從 Excel / Google 試算表複製「座號、分數」貼上。
+          </p>
+
+          <div id="csv-dropzone" class="dropzone" tabindex="0">
+            <input id="csv-file-input" type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" class="hidden" />
+            <div class="dropzone-icon">📄</div>
+            <div class="dropzone-title">拖曳 CSV 檔案到此處，或點擊選擇檔案</div>
+            <div class="dropzone-sub">支援 .csv / .tsv / .txt（自動偵測 UTF-8 / Big5 編碼）</div>
+          </div>
+
+          <div class="field-group" style="margin-top: 14px;">
+            <div class="label-row">
+              <label class="field-label" for="csv-paste-input">或直接貼上表格內容</label>
+              <div class="quick-sample-btns">
+                <button id="btn-sample-two-col" type="button" class="link-btn">填入兩欄快速範例</button>
+                <button id="btn-sample-wide" type="button" class="link-btn">填入寬表多科範例</button>
+                <button id="btn-clear-import" type="button" class="link-btn">清除</button>
+              </div>
+            </div>
+            <textarea
+              id="csv-paste-input"
+              class="textarea-code"
+              rows="6"
+              placeholder="範例 1（兩欄快速登錄）：&#10;1, 95&#10;2, 88&#10;29, 100&#10;&#10;範例 2（多欄寬表）：&#10;座號, 姓名, 第1次小考, 期中考, 期末考&#10;1, 王小明, 92, 88, 94"
+            ></textarea>
+          </div>
+
+          <div class="template-box">
+            <div class="template-title">📥 下載空白 CSV 範本（1~29 號）</div>
+            <div class="template-actions">
+              <button id="btn-tpl-quick" type="button" class="btn btn-secondary btn-sm">極速兩欄範本</button>
+              <button id="btn-tpl-wide" type="button" class="btn btn-secondary btn-sm">單科寬表範本（小考＋期中＋期末）</button>
+              <button id="btn-tpl-long" type="button" class="btn btn-secondary btn-sm">全科明細範本</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="import-preview-card" class="card hidden">
+          <div class="preview-header">
+            <div>
+              <h2 class="section-title">確認欄位與匯入預覽</h2>
+              <div id="import-meta-badges" class="meta-badges"></div>
+            </div>
+          </div>
+
+          <div id="import-twocol-config" class="config-box hidden">
+            <div class="form-grid-4">
+              <div class="field-group">
+                <label class="field-label" for="imp-target-subject">寫入科目</label>
+                <select id="imp-target-subject" class="input-select"></select>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="imp-target-category">成績類別</label>
+                <select id="imp-target-category" class="input-select"></select>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="imp-target-assessment">寫入評量欄位</label>
+                <select id="imp-target-assessment" class="input-select"></select>
+              </div>
+              <div id="imp-new-title-wrap" class="field-group hidden">
+                <label class="field-label" for="imp-new-title">新評量名稱</label>
+                <input id="imp-new-title" type="text" class="input-text" placeholder="例如：L3生字聽寫" />
+              </div>
+            </div>
+          </div>
+
+          <div id="import-wide-config" class="config-box hidden">
+            <div class="wide-default-row">
+              <label class="field-label" for="imp-wide-default-subject" style="margin:0;">未指定科目之欄位預設歸屬：</label>
+              <select id="imp-wide-default-subject" class="input-select" style="width:auto;"></select>
+              <button id="btn-apply-wide-default-subj" type="button" class="btn btn-secondary btn-sm">套用到全部未指定欄</button>
+            </div>
+            <div class="table-scroll" style="margin-top: 10px;">
+              <table id="imp-wide-mapping-table" class="data-table compact-table"></table>
+            </div>
+          </div>
+
+          <div class="import-options-row">
+            <label class="toggle-chip">
+              <input id="chk-imp-overwrite" type="checkbox" checked />
+              <span>覆蓋已有成績（取消則僅補填空白）</span>
+            </label>
+            <label class="toggle-chip">
+              <input id="chk-imp-include-test" type="checkbox" checked />
+              <span>同時匯入 29 號測試座號</span>
+            </label>
+          </div>
+
+          <div id="import-summary-pills" class="summary-pills"></div>
+          <div id="import-warnings-box" class="warn-banner hidden"></div>
+
+          <div class="table-scroll" style="max-height: 340px; margin-top: 12px;">
+            <table id="import-diff-table" class="data-table compact-table"></table>
+          </div>
+
+          <div class="import-footer-actions">
+            <button id="btn-commit-import" type="button" class="btn btn-primary">確認匯入成績</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 分頁 4：CSV 匯出 -->
+    <section id="tab-export" class="tab-panel hidden">
+      <div class="card">
+        <h2 class="section-title">匯出選項</h2>
+        <p class="section-hint" style="margin-bottom: 10px;">所有匯出的 CSV 皆附帶 UTF-8 BOM，Excel 雙擊開啟不會亂碼。</p>
+        <div class="import-options-row" style="margin-top:0;">
+          <label class="toggle-chip">
+            <input id="chk-exp-include-test" type="checkbox" checked />
+            <span>匯出包含 29 號測試座號（標註「測試座號」）</span>
+          </label>
+          <label class="toggle-chip">
+            <input id="chk-exp-include-names" type="checkbox" checked />
+            <span>匯出包含本機姓名欄</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="export-grid">
+        <div class="card export-card">
+          <div class="export-badge">單科明細</div>
+          <h3>單一科目成績 CSV</h3>
+          <p class="section-hint">包含該科每一次小考、小考平均、期中考、期末考、科目平均與班級統計。</p>
+          <div class="field-group" style="margin-top: 12px;">
+            <label class="field-label" for="exp-subject-select">選擇科目</label>
+            <select id="exp-subject-select" class="input-select"></select>
+          </div>
+          <button id="btn-do-export-subject" type="button" class="btn btn-primary btn-block" style="margin-top: 12px;">
+            ⬇️ 下載單科成績 CSV
+          </button>
+        </div>
+
+        <div class="card export-card">
+          <div class="export-badge badge-purple">全科彙整</div>
+          <h3>1~29 號六科總表 CSV</h3>
+          <p class="section-hint">一次輸出國語、數學、綜合、體育、彈性、校本六科成績、總平均與參考排名。</p>
+          <div class="field-group" style="margin-top: 12px;">
+            <label class="field-label" for="exp-overview-metric">輸出內容格式</label>
+            <select id="exp-overview-metric" class="input-select">
+              <option value="all_details">完整展開（每科含小考平均／期中／期末／平均）</option>
+              <option value="subjectAvg">精簡總表（僅各科平均＋總平均＋排名）</option>
+              <option value="quiz">僅各科小考平均</option>
+              <option value="midterm">僅各科期中考</option>
+              <option value="final">僅各科期末考</option>
+            </select>
+          </div>
+          <button id="btn-do-export-overview" type="button" class="btn btn-primary btn-block" style="margin-top: 12px;">
+            ⬇️ 下載全科總表 CSV
+          </button>
+        </div>
+
+        <div class="card export-card">
+          <div class="export-badge badge-green">可無損還原</div>
+          <h3>完整明細備份 CSV</h3>
+          <p class="section-hint">每筆成績一列，日後拖回「CSV 上傳」即可完整還原所有小考與期中／期末。</p>
+          <button id="btn-do-export-long" type="button" class="btn btn-soft btn-block" style="margin-top: auto;">
+            ⬇️ 下載完整明細 CSV
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 分頁 5：班級設定 -->
+    <section id="tab-settings" class="tab-panel hidden">
+      <div class="settings-grid">
+        <div class="card">
+          <h2 class="section-title">班級與座號設定</h2>
+          <div class="form-grid-2" style="margin-top: 12px;">
+            <div class="field-group">
+              <label class="field-label" for="set-class-name">班級名稱</label>
+              <input id="set-class-name" type="text" class="input-text" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="set-semester-name">學期名稱</label>
+              <input id="set-semester-name" type="text" class="input-text" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="set-max-seat">最大座號 (1~50)</label>
+              <input id="set-max-seat" type="number" min="1" max="50" class="input-text" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="set-test-seats">測試座號（逗號分隔）</label>
+              <input id="set-test-seats" type="text" class="input-text" placeholder="例如：29" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="set-inactive-seats">空號／轉出座號（逗號分隔）</label>
+              <input id="set-inactive-seats" type="text" class="input-text" placeholder="例如：15, 23" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="set-absent-mode">缺考計算方式</label>
+              <select id="set-absent-mode" class="input-select">
+                <option value="exclude">暫不計入平均（待補考提醒）</option>
+                <option value="zero">缺考以 0 分計入平均</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="set-helper-pin">學生協助模式解除密碼（預設 4020）</label>
+              <input id="set-helper-pin" type="text" class="input-text" placeholder="留白則不設密碼" />
+            </div>
+          </div>
+          <div style="margin-top: 14px;">
+            <button id="btn-save-basic-settings" type="button" class="btn btn-primary">儲存基本設定</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="section-title">本機座號姓名對照表</h2>
+          <p class="section-hint" style="margin-bottom: 10px;">
+            僅存於本機瀏覽器，支援「座號 姓名」或「座號,姓名」每行一位；投影時可用頁首「👁️ 隱藏姓名」遮蔽。
+          </p>
+          <textarea
+            id="set-roster-text"
+            class="textarea-code"
+            rows="8"
+            placeholder="01 王小明&#10;02 陳小華&#10;...&#10;29 測試學生"
+          ></textarea>
+          <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+            <button id="btn-save-roster" type="button" class="btn btn-primary btn-sm">儲存姓名對照表</button>
+            <button id="btn-clear-roster" type="button" class="btn btn-secondary btn-sm">清空姓名</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top: 16px;">
+        <h2 class="section-title">測試工具與系統備份</h2>
+        <div class="tools-row" style="margin-top: 12px;">
+          <button id="btn-tool-fill-29" type="button" class="btn btn-secondary">🧪 幫 29 號填入測試成績</button>
+          <button id="btn-tool-clear-29" type="button" class="btn btn-secondary">🧹 清除 29 號成績</button>
+          <button id="btn-tool-load-demo" type="button" class="btn btn-soft">✨ 載入示範班級資料</button>
+          <button id="btn-tool-export-json" type="button" class="btn btn-secondary">💾 匯出 JSON 備份</button>
+          <button id="btn-tool-import-json" type="button" class="btn btn-secondary">📂 還原 JSON 備份</button>
+          <input id="json-backup-input" type="file" accept=".json,application/json" class="hidden" />
+          <button id="btn-tool-reset-all" type="button" class="btn btn-danger">🗑️ 清空全部成績</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden no-print" role="dialog" aria-modal="true">
+    <div id="modal-box" class="modal-card"></div>
+  </div>
+
+  <div id="toast-container" class="toast-container no-print" aria-live="polite"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/csv.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

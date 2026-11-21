@@ -1,0 +1,107 @@
+// 學生成績管理系統設定常數與科目／類別定義
+window.GRADE_CONFIG = {
+  STORAGE_KEY: "grade_manager_v1_state",
+  BACKUP_SNAPSHOT_KEY: "grade_manager_v1_pre_import_snapshot",
+
+  DEFAULT_SETTINGS: {
+    className: "402 班",
+    semesterName: "115 學年度第 1 學期",
+    maxSeat: 29,
+    testSeats: [29],
+    inactiveSeats: [],
+    includeTestInStats: false,
+    hideNames: false,
+    absentMode: "exclude", // "exclude" | "zero"
+    studentHelperMode: false,
+    helperPin: "4020",
+  },
+
+  SUBJECTS: [
+    {
+      id: "chinese",
+      name: "國語",
+      short: "國",
+      color: "#0071e3",
+      bg: "rgba(0, 113, 227, 0.11)",
+      aliases: ["國語", "國語文", "國文", "國", "chinese"],
+    },
+    {
+      id: "math",
+      name: "數學",
+      short: "數",
+      color: "#8944ab",
+      bg: "rgba(175, 82, 222, 0.12)",
+      aliases: ["數學", "數學科", "數", "math"],
+    },
+    {
+      id: "integrated",
+      name: "綜合",
+      short: "綜",
+      color: "#b25000",
+      bg: "rgba(255, 149, 0, 0.13)",
+      aliases: ["綜合", "綜合活動", "綜", "integrated"],
+    },
+    {
+      id: "pe",
+      name: "體育",
+      short: "體",
+      color: "#1e7e34",
+      bg: "rgba(52, 199, 89, 0.13)",
+      aliases: ["體育", "健康與體育", "健體", "體", "pe"],
+    },
+    {
+      id: "flexible",
+      name: "彈性",
+      short: "彈",
+      color: "#0a7385",
+      bg: "rgba(48, 176, 199, 0.14)",
+      aliases: ["彈性", "彈性學習", "彈性課程", "彈", "flexible"],
+    },
+    {
+      id: "school_based",
+      name: "校本",
+      short: "校",
+      color: "#c92a2a",
+      bg: "rgba(255, 59, 48, 0.11)",
+      aliases: ["校本", "校本課程", "校訂課程", "校", "school_based", "school-based"],
+    },
+  ],
+
+  CATEGORIES: [
+    {
+      id: "quiz",
+      name: "小考",
+      short: "小考",
+      color: "#0071e3",
+      bg: "rgba(0, 113, 227, 0.1)",
+      aliases: [
+        "小考",
+        "平時",
+        "平時考",
+        "平時測驗",
+        "平時評量",
+        "隨堂",
+        "隨堂考",
+        "隨堂測驗",
+        "聽寫",
+        "quiz",
+      ],
+    },
+    {
+      id: "midterm",
+      name: "期中考",
+      short: "期中",
+      color: "#b25000",
+      bg: "rgba(255, 149, 0, 0.13)",
+      aliases: ["期中考", "期中", "期中評量", "第一次定期評量", "一次段考", "midterm"],
+    },
+    {
+      id: "final",
+      name: "期末考",
+      short: "期末",
+      color: "#8944ab",
+      bg: "rgba(175, 82, 222, 0.12)",
+      aliases: ["期末考", "期末", "期末評量", "第二次定期評量", "二次段考", "final"],
+    },
+  ],
+};
