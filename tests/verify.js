@@ -273,7 +273,132 @@ function runTests() {
   store.toggleAssessmentLock(chMidExam.id);
   assert.equal(store.setScore(chMidExam.id, 1, "96").valid, true);
 
-  console.log("ALL 14 GRADE-MANAGER TEST SUITES PASSED!");
+  console.log("ALL 14 LOCAL TESTS PASSED, RUNNING SUITE 15 CLOUD SYNC TESTS...");
+}
+
+async function runCloudTests() {
+  const { context } = loadAppModules();
+  const calls = [];
+  let failNextSetScore = false;
+
+  context.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    calls.push({ url, body });
+
+    if (body.action === "helper_get_state") {
+      if (body.helper_pin !== "4020") {
+        return { ok: false, status: 401, json: async () => ({ error: "unauthorized" }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          role: "helper",
+          settings: {
+            className: "402 班",
+            semesterName: "115 學年度第 1 學期",
+            maxSeat: 29,
+            testSeats: [29],
+            inactiveSeats: [],
+            includeTestInStats: false,
+            absentMode: "exclude",
+            studentHelperMode: true,
+            helperEnabled: true,
+          },
+          assessments: [
+            {
+              id: "chinese_quiz_1",
+              subjectId: "chinese",
+              category: "quiz",
+              title: "第1次小考",
+              date: "",
+              maxScore: 100,
+              order: 1,
+              locked: false,
+              scores: { "1": 85 },
+              notes: {},
+            },
+            {
+              id: "chinese_midterm_1",
+              subjectId: "chinese",
+              category: "midterm",
+              title: "期中考",
+              date: "",
+              maxScore: 100,
+              order: 2,
+              locked: true,
+              scores: { "1": 90 },
+              notes: {},
+            },
+          ],
+          serverTime: "2026-11-21T04:25:00Z",
+        }),
+      };
+    }
+
+    if (body.action === "helper_add_assessment") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          assessment: {
+            id: "math_quiz_cloud_1",
+            subjectId: body.subjectId,
+            category: body.category,
+            title: body.title || "第1次小考",
+            date: "",
+            maxScore: body.maxScore || 100,
+            order: 99,
+            locked: false,
+            scores: {},
+            notes: {},
+          },
+        }),
+      };
+    }
+
+    if (body.action === "helper_set_score") {
+      if (failNextSetScore) {
+        return { ok: false, status: 403, json: async () => ({ error: "此欄位已鎖定，請教師先解除鎖定" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, value: body.value }) };
+    }
+
+    return { ok: false, status: 400, json: async () => ({ error: "bad" }) };
+  };
+
+  const store = context.GradeStoreFactory.createStore(context.localStorage);
+
+  // 錯誤通行碼應被拒
+  await assert.rejects(() => store.connectCloudHelper("9999"), /unauthorized/);
+
+  // 正確通行碼登入平板協助模式
+  await store.connectCloudHelper("4020");
+  assert.equal(store.getCloudSession().mode, "cloud_helper");
+  assert.equal(store.getState().settings.studentHelperMode, true);
+  assert.equal(store.getState().assessments[0].scores["1"], 85);
+
+  // 新增雲端小考並輸入成績
+  const created = await store.syncAddAssessment({ subjectId: "math", category: "quiz", title: "雲端平板小考" });
+  assert.equal(created.id, "math_quiz_cloud_1");
+
+  const okRes = await store.syncSetScore("math_quiz_cloud_1", 2, "93");
+  assert.equal(okRes.valid, true);
+  assert.equal(store.getState().assessments.find((a) => a.id === "math_quiz_cloud_1").scores["2"], 93);
+
+  // 若伺服器端剛鎖定該欄（403），本地樂觀寫入應回滾並重新同步
+  failNextSetScore = true;
+  const failRes = await store.syncSetScore("chinese_quiz_1", 1, "55");
+  assert.equal(failRes.valid, false);
+  assert.equal(store.getState().assessments.find((a) => a.id === "chinese_quiz_1").scores["1"], 85);
+
+  console.log("ALL 15 GRADE-MANAGER TEST SUITES (INCLUDING CLOUD SYNC) PASSED!");
 }
 
 runTests();
+runCloudTests().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

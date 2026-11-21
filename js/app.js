@@ -12,14 +12,23 @@
     overviewOnlyAlert: false,
     importState: null,
     undoMessage: "",
+    authTab: "teacher",
+    pollTimerId: null,
+    pendingSaves: 0,
+    isBooting: false,
   };
 
   function $(id) {
     return document.getElementById(id);
   }
 
+  function isCloudMode() {
+    return store.getCloudSession().mode !== "local";
+  }
+
   function isHelperMode() {
-    return Boolean(store.getState().settings.studentHelperMode);
+    const sess = store.getCloudSession();
+    return sess.mode === "cloud_helper" || Boolean(store.getState().settings.studentHelperMode);
   }
 
   function escapeHtml(str) {
@@ -78,23 +87,56 @@
     return "score-input";
   }
 
+  function updateSyncPill(meta) {
+    const pill = $("hdr-sync-pill");
+    if (!pill) return;
+    const mode = meta?.mode || store.getCloudSession().mode;
+    if (mode === "local") {
+      pill.className = "badge badge-neutral";
+      pill.textContent = "💻 本機單機";
+      return;
+    }
+    if (meta?.status === "syncing") {
+      pill.className = "badge badge-blue";
+      pill.textContent = "⏳ 同步中…";
+    } else if (meta?.status === "error") {
+      pill.className = "badge badge-bad";
+      pill.textContent = "⚠️ 同步失敗";
+      pill.title = meta.lastError || "請檢查網路或點擊立即同步";
+    } else {
+      pill.className = "badge badge-ok";
+      const timeStr = meta?.lastSyncedAt
+        ? new Date(meta.lastSyncedAt).toLocaleTimeString("zh-TW", { hour12: false })
+        : "";
+      pill.textContent = timeStr ? `☁️ 已同步 ${timeStr}` : "☁️ 雲端同步";
+    }
+  }
+
   function renderHeader() {
     const st = store.getState().settings;
-    const helper = Boolean(st.studentHelperMode);
+    const sess = store.getCloudSession();
+    const isCloud = sess.mode !== "local";
+    const isTabletHelper = sess.mode === "cloud_helper";
+    const helper = isHelperMode();
 
     $("hdr-class-badge").textContent = st.className;
     const testLabel = st.testSeats.length ? `${st.testSeats.join("、")} 號為測試座號` : "無測試座號";
     $("hdr-seat-badge").textContent = `1~${st.maxSeat} 號（${testLabel}）`;
     $("hdr-semester-sub").textContent = helper
-      ? `${st.semesterName} · 學生協助登打模式`
-      : `${st.semesterName} · 本機即時儲存`;
+      ? `${st.semesterName} · ${isTabletHelper ? "平板雲端協助登打" : "學生協助登打模式"}`
+      : `${st.semesterName} · ${isCloud ? "Supabase 雲端即時同步" : "本機離線儲存"}`;
+
+    updateSyncPill(store.getSyncMeta());
 
     $("helper-mode-banner").classList.toggle("hidden", !helper);
+    $("btn-exit-helper-mode").textContent = isTabletHelper ? "🚪 登出平板模式" : "🔓 教師解除模式";
     $("tabs-wrap").classList.toggle("hidden", helper);
+    $("btn-sync-now").classList.toggle("hidden", !isCloud);
     $("btn-enter-helper-mode").classList.toggle("hidden", helper);
     $("btn-toggle-privacy").classList.toggle("hidden", helper);
     $("btn-quick-import").classList.toggle("hidden", helper);
     $("btn-quick-export").classList.toggle("hidden", helper);
+    $("btn-logout").classList.toggle("hidden", isTabletHelper);
 
     const privBtn = $("btn-toggle-privacy");
     if (st.hideNames) {
@@ -495,17 +537,57 @@
     const aid = inputEl.dataset.assessmentId;
     const item = store.getState().assessments.find((a) => a.id === aid);
     if (!item) return true;
-
-    const result = store.setScore(aid, seat, inputEl.value);
-    if (!result.valid) {
-      inputEl.classList.add("is-invalid");
-      showToast(result.error, "err");
+    if (item.locked) {
+      inputEl.value = formatCellValueForInput(item.scores[String(seat)]);
+      showToast("此欄位已鎖定，請先解鎖", "err");
       return false;
     }
 
-    inputEl.className = `${getCellInputClass(result.value, item.maxScore)}${item.locked ? " is-locked" : ""}`;
-    inputEl.value = formatCellValueForInput(result.value);
+    const parsed = store.parseCellInput(inputEl.value, item.maxScore);
+    if (!parsed.valid) {
+      inputEl.classList.add("is-invalid");
+      showToast(parsed.error, "err");
+      return false;
+    }
+
+    const prevRaw = item.scores[String(seat)];
+    const rawStr = inputEl.value;
+    if (!isCloudMode()) {
+      const result = store.setScore(aid, seat, rawStr);
+      if (!result.valid) {
+        inputEl.classList.add("is-invalid");
+        showToast(result.error, "err");
+        return false;
+      }
+      inputEl.className = `${getCellInputClass(result.value, item.maxScore)}${item.locked ? " is-locked" : ""}`;
+      inputEl.value = formatCellValueForInput(result.value);
+      updateEntryRowAndStatsIncremental(seat, aid);
+      return true;
+    }
+
+    // 雲端模式：先做合法性與樂觀 UI 更新讓鍵盤連打零延遲，同時背景同步至 Supabase
+    if (parsed.value === null) delete item.scores[String(seat)];
+    else item.scores[String(seat)] = parsed.value;
+    inputEl.className = `${getCellInputClass(parsed.value, item.maxScore)}${item.locked ? " is-locked" : ""}`;
+    inputEl.value = formatCellValueForInput(parsed.value);
     updateEntryRowAndStatsIncremental(seat, aid);
+
+    // 恢復成 prevRaw 讓 syncSetScore 處理樂觀覆寫與失敗回滾
+    if (prevRaw === undefined) delete item.scores[String(seat)];
+    else item.scores[String(seat)] = prevRaw;
+
+    ui.pendingSaves++;
+    store
+      .syncSetScore(aid, seat, rawStr)
+      .then((res) => {
+        if (!res.valid) {
+          showToast(res.error || "雲端儲存失敗", "err");
+          renderEntryTab();
+        }
+      })
+      .finally(() => {
+        ui.pendingSaves = Math.max(0, ui.pendingSaves - 1);
+      });
     return true;
   }
 
@@ -952,6 +1034,8 @@
     $("set-inactive-seats").value = st.inactiveSeats.join(", ");
     $("set-absent-mode").value = st.absentMode;
     $("set-helper-pin").value = st.helperPin || "";
+    $("set-helper-enabled").checked = st.helperEnabled !== false;
+    $("btn-tool-push-local").classList.toggle("hidden", store.getCloudSession().mode !== "cloud_teacher");
 
     const lines = [];
     for (let s = 1; s <= st.maxSeat; s++) {
@@ -1007,27 +1091,35 @@
     const titleInput = $("m-add-title");
     titleInput.focus();
 
-    const submit = () => {
+    const submit = async () => {
       const cat = $("m-add-cat").value;
       const title = titleInput.value.trim();
       const maxScore = Number($("m-add-max").value) || 100;
-      const item = store.addAssessment({
-        subjectId: ui.activeSubjectId,
-        category: cat,
-        title,
-        maxScore,
-      });
-      closeModal();
-      if (ui.activeCategoryFilter !== "all" && ui.activeCategoryFilter !== cat) {
-        ui.activeCategoryFilter = "all";
+      const btn = $("m-btn-create-assessment");
+      btn.disabled = true;
+      try {
+        const item = await store.syncAddAssessment({
+          subjectId: ui.activeSubjectId,
+          category: cat,
+          title,
+          maxScore,
+        });
+        closeModal();
+        if (ui.activeCategoryFilter !== "all" && ui.activeCategoryFilter !== cat) {
+          ui.activeCategoryFilter = "all";
+        }
+        renderEntryTab();
+        if (item) {
+          const firstInput = $("grade-entry-table").querySelector(
+            `input.score-input[data-seat="1"][data-assessment-id="${CSS.escape(item.id)}"]`,
+          );
+          if (firstInput) firstInput.focus();
+          showToast(`已新增「${item.title}」`, "ok");
+        }
+      } catch (err) {
+        btn.disabled = false;
+        showToast(`新增失敗：${err.message}`, "err");
       }
-      renderEntryTab();
-      // 自動聚焦到新增欄位的 1 號，馬上就能打分數！
-      const firstInput = $("grade-entry-table").querySelector(
-        `input.score-input[data-seat="1"][data-assessment-id="${CSS.escape(item.id)}"]`,
-      );
-      if (firstInput) firstInput.focus();
-      showToast(`已新增「${item.title}」`, "ok");
     };
 
     $("m-btn-create-assessment").addEventListener("click", submit);
@@ -1093,55 +1185,79 @@
     `);
 
     if (item.locked && $("m-ed-unlock-now")) {
-      $("m-ed-unlock-now").addEventListener("click", () => {
-        store.setAssessmentLocked(assessmentId, false);
-        renderEntryTable();
-        openEditAssessmentModal(assessmentId);
-        showToast(`已解除鎖定「${item.title}」`, "ok");
+      $("m-ed-unlock-now").addEventListener("click", async () => {
+        try {
+          await store.syncSetLocked(assessmentId, false);
+          renderEntryTable();
+          openEditAssessmentModal(assessmentId);
+          showToast(`已解除鎖定「${item.title}」`, "ok");
+        } catch (err) {
+          showToast(`解鎖失敗：${err.message}`, "err");
+        }
       });
     }
 
     if ($("m-btn-save-assessment")) {
-      $("m-btn-save-assessment").addEventListener("click", () => {
-        store.updateAssessment(assessmentId, {
-          category: $("m-ed-cat").value,
-          title: $("m-ed-title").value,
-          maxScore: Number($("m-ed-max").value) || 100,
-        });
-        closeModal();
-        renderEntryTab();
-        showToast("已更新評量設定", "ok");
+      $("m-btn-save-assessment").addEventListener("click", async () => {
+        try {
+          await store.syncUpdateAssessment(assessmentId, {
+            category: $("m-ed-cat").value,
+            title: $("m-ed-title").value,
+            maxScore: Number($("m-ed-max").value) || 100,
+          });
+          closeModal();
+          renderEntryTab();
+          showToast("已更新評量設定", "ok");
+        } catch (err) {
+          showToast(`更新失敗：${err.message}`, "err");
+        }
       });
     }
 
-    $("m-ed-add5").addEventListener("click", () => {
-      const cnt = store.bulkAdjustAssessment(assessmentId, "add", 5);
-      closeModal();
-      renderEntryTab();
-      showToast(`已替 ${cnt} 位學生加 5 分`, "ok");
+    $("m-ed-add5").addEventListener("click", async () => {
+      try {
+        const cnt = await store.syncBulkAdjust(assessmentId, "add", 5);
+        closeModal();
+        renderEntryTab();
+        showToast(`已替 ${cnt} 位學生加 5 分`, "ok");
+      } catch (err) {
+        showToast(`調分失敗：${err.message}`, "err");
+      }
     });
 
-    $("m-ed-sub5").addEventListener("click", () => {
-      const cnt = store.bulkAdjustAssessment(assessmentId, "add", -5);
-      closeModal();
-      renderEntryTab();
-      showToast(`已替 ${cnt} 位學生減 5 分`, "ok");
+    $("m-ed-sub5").addEventListener("click", async () => {
+      try {
+        const cnt = await store.syncBulkAdjust(assessmentId, "add", -5);
+        closeModal();
+        renderEntryTab();
+        showToast(`已替 ${cnt} 位學生減 5 分`, "ok");
+      } catch (err) {
+        showToast(`調分失敗：${err.message}`, "err");
+      }
     });
 
-    $("m-ed-clear-scores").addEventListener("click", () => {
+    $("m-ed-clear-scores").addEventListener("click", async () => {
       if (!confirm(`確定要清空「${item.title}」的所有分數嗎？`)) return;
-      store.bulkAdjustAssessment(assessmentId, "clear");
-      closeModal();
-      renderEntryTab();
-      showToast("已清空該欄分數");
+      try {
+        await store.syncBulkAdjust(assessmentId, "clear");
+        closeModal();
+        renderEntryTab();
+        showToast("已清空該欄分數");
+      } catch (err) {
+        showToast(`清空失敗：${err.message}`, "err");
+      }
     });
 
-    $("m-ed-delete").addEventListener("click", () => {
+    $("m-ed-delete").addEventListener("click", async () => {
       if (!confirm(`確定要刪除「${item.title}」整個欄位與分數嗎？`)) return;
-      store.deleteAssessment(assessmentId);
-      closeModal();
-      renderEntryTab();
-      showToast("已刪除評量欄位");
+      try {
+        await store.syncDeleteAssessment(assessmentId);
+        closeModal();
+        renderEntryTab();
+        showToast("已刪除評量欄位");
+      } catch (err) {
+        showToast(`刪除失敗：${err.message}`, "err");
+      }
     });
   }
 
@@ -1248,11 +1364,15 @@
     `);
     const noteInput = $("m-note-input");
     noteInput.focus();
-    const saveNote = () => {
-      store.setNote(assessmentId, seat, noteInput.value);
-      closeModal();
-      renderEntryTable();
-      showToast("已儲存備註", "ok");
+    const saveNote = async () => {
+      try {
+        await store.syncSetNote(assessmentId, seat, noteInput.value);
+        closeModal();
+        renderEntryTable();
+        showToast("已儲存備註", "ok");
+      } catch (err) {
+        showToast(`儲存備註失敗：${err.message}`, "err");
+      }
     };
     $("m-btn-save-note").addEventListener("click", saveNote);
     noteInput.addEventListener("keydown", (e) => {
@@ -1356,20 +1476,53 @@
     });
 
     $("btn-enter-helper-mode").addEventListener("click", () => openEnterHelperModeModal());
-    $("btn-exit-helper-mode").addEventListener("click", () => openExitHelperModeModal());
+    $("btn-exit-helper-mode").addEventListener("click", () => {
+      if (store.getCloudSession().mode === "cloud_helper") {
+        store.disconnectCloud();
+        showAuthView("helper");
+        showToast("已登出平板協助登打模式");
+        return;
+      }
+      openExitHelperModeModal();
+    });
+
+    $("btn-sync-now").addEventListener("click", async () => {
+      try {
+        await store.syncFromCloud();
+        renderActiveTab();
+        showToast("已同步最新雲端成績", "ok");
+      } catch (err) {
+        showToast(`同步失敗：${err.message}`, "err");
+      }
+    });
+
+    $("btn-logout").addEventListener("click", () => {
+      if (isHelperMode() && store.getCloudSession().mode !== "cloud_helper") return;
+      store.disconnectCloud();
+      showAuthView("teacher");
+      showToast("已登出");
+    });
 
     $("btn-toggle-privacy").addEventListener("click", () => {
       if (isHelperMode()) return;
       const next = !store.getState().settings.hideNames;
-      store.updateSettings({ hideNames: next });
+      store.syncUpdateSettings({ hideNames: next });
       renderActiveTab();
     });
 
     $("btn-quick-import").addEventListener("click", () => switchTab("import"));
     $("btn-quick-export").addEventListener("click", () => switchTab("export"));
 
-    $("btn-undo-snapshot").addEventListener("click", () => {
+    $("btn-undo-snapshot").addEventListener("click", async () => {
       if (store.restorePreImportSnapshot()) {
+        if (store.getCloudSession().mode === "cloud_teacher") {
+          try {
+            await store.syncReplaceFullState(store.getState());
+          } catch (err) {
+            showToast(`雲端復原失敗：${err.message}`, "err");
+            return;
+          }
+        }
         ui.undoMessage = "";
         ui.importState = null;
         renderActiveTab();
@@ -1391,13 +1544,25 @@
       renderEntryTab();
     });
 
-    $("chk-include-test-stats").addEventListener("change", (e) => {
-      store.updateSettings({ includeTestInStats: e.target.checked });
-      renderEntryTab();
+    $("chk-include-test-stats").addEventListener("change", async (e) => {
+      try {
+        await store.syncUpdateSettings({ includeTestInStats: e.target.checked });
+        renderEntryTab();
+      } catch (err) {
+        showToast(`更新失敗：${err.message}`, "err");
+      }
     });
 
-    $("btn-fill-test-seat").addEventListener("click", () => {
+    $("btn-fill-test-seat").addEventListener("click", async () => {
       store.fillTestSeatDemoScores();
+      if (store.getCloudSession().mode === "cloud_teacher") {
+        try {
+          await store.syncReplaceFullState(store.getState());
+        } catch (err) {
+          showToast(`雲端更新失敗：${err.message}`, "err");
+          return;
+        }
+      }
       renderEntryTab();
       showToast("已替 29 號測試座號填入各科測試成績", "ok");
     });
@@ -1417,17 +1582,24 @@
     });
 
     const entryTable = $("grade-entry-table");
-    entryTable.addEventListener("click", (e) => {
+    entryTable.addEventListener("click", async (e) => {
       const lockBtn = e.target.closest("[data-toggle-lock]");
       if (lockBtn) {
         if (isHelperMode()) return;
-        const toggled = store.toggleAssessmentLock(lockBtn.dataset.toggleLock);
-        if (toggled) {
-          renderEntryTable();
-          showToast(
-            toggled.locked ? `已鎖定「${toggled.title}」，防止誤觸修改` : `已解除鎖定「${toggled.title}」`,
-            toggled.locked ? "default" : "ok",
-          );
+        const aid = lockBtn.dataset.toggleLock;
+        const cur = store.getState().assessments.find((a) => a.id === aid);
+        if (!cur) return;
+        try {
+          const toggled = await store.syncSetLocked(aid, !cur.locked);
+          if (toggled) {
+            renderEntryTable();
+            showToast(
+              toggled.locked ? `已鎖定「${toggled.title}」，防止誤觸修改` : `已解除鎖定「${toggled.title}」`,
+              toggled.locked ? "default" : "ok",
+            );
+          }
+        } catch (err) {
+          showToast(`切換鎖定失敗：${err.message}`, "err");
         }
         return;
       }
@@ -1650,24 +1822,33 @@
       renderImportTab();
     });
 
-    $("btn-commit-import").addEventListener("click", () => {
+    $("btn-commit-import").addEventListener("click", async () => {
       if (!ui.importState || !ui.importState.lastPreview) return;
       const preview = ui.importState.lastPreview;
       if (preview.operations.length === 0) return;
 
-      const res = store.applyImportOperations(preview.operations, {
-        overwriteExisting: ui.importState.config.overwriteExisting,
-        includeTestSeats: ui.importState.config.includeTestSeats,
-      });
+      const btn = $("btn-commit-import");
+      btn.disabled = true;
+      btn.textContent = "匯入同步中…";
+      try {
+        const res = await store.syncImportOperations(preview.operations, {
+          overwriteExisting: ui.importState.config.overwriteExisting,
+          includeTestSeats: ui.importState.config.includeTestSeats,
+        });
 
-      if (preview.stats.affectedSubjects.length === 1) {
-        ui.activeSubjectId = preview.stats.affectedSubjects[0];
+        if (preview.stats.affectedSubjects.length === 1) {
+          ui.activeSubjectId = preview.stats.affectedSubjects[0];
+        }
+        ui.undoMessage = `剛完成 CSV 匯入：新增 ${res.addedCount} 筆、更新 ${res.updatedCount} 筆（若需退回可按右側復原）`;
+        ui.importState = null;
+        $("csv-paste-input").value = "";
+        switchTab("entry");
+        showToast(`匯入完成！新增 ${res.addedCount} 筆、更新 ${res.updatedCount} 筆`, "ok");
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = `確認匯入 ${preview.operations.length} 筆成績`;
+        showToast(`匯入失敗：${err.message}`, "err");
       }
-      ui.undoMessage = `剛完成 CSV 匯入：新增 ${res.addedCount} 筆、更新 ${res.updatedCount} 筆（若需退回可按右側復原）`;
-      ui.importState = null;
-      $("csv-paste-input").value = "";
-      switchTab("entry");
-      showToast(`匯入完成！新增 ${res.addedCount} 筆、更新 ${res.updatedCount} 筆`, "ok");
     });
 
     $("btn-do-export-subject").addEventListener("click", () => {
@@ -1694,24 +1875,41 @@
       showToast("已下載完整明細 CSV", "ok");
     });
 
-    $("btn-save-basic-settings").addEventListener("click", () => {
+    $("btn-save-basic-settings").addEventListener("click", async () => {
       const parseSeatList = (str) =>
         String(str || "")
           .split(/[,，\s]+/)
           .map((x) => Number(x.trim()))
           .filter((n) => Number.isInteger(n) && n >= 1 && n <= 50);
 
-      store.updateSettings({
-        className: $("set-class-name").value,
-        semesterName: $("set-semester-name").value,
-        maxSeat: Math.max(1, Math.min(50, Number($("set-max-seat").value) || 29)),
-        testSeats: parseSeatList($("set-test-seats").value),
-        inactiveSeats: parseSeatList($("set-inactive-seats").value),
-        absentMode: $("set-absent-mode").value,
-        helperPin: $("set-helper-pin").value.trim(),
-      });
-      renderActiveTab();
-      showToast("已儲存班級與座號設定", "ok");
+      try {
+        await store.syncUpdateSettings({
+          className: $("set-class-name").value,
+          semesterName: $("set-semester-name").value,
+          maxSeat: Math.max(1, Math.min(50, Number($("set-max-seat").value) || 29)),
+          testSeats: parseSeatList($("set-test-seats").value),
+          inactiveSeats: parseSeatList($("set-inactive-seats").value),
+          absentMode: $("set-absent-mode").value,
+          helperPin: $("set-helper-pin").value.trim(),
+          helperEnabled: $("set-helper-enabled").checked,
+        });
+        renderActiveTab();
+        showToast("已儲存班級與平板同步設定", "ok");
+      } catch (err) {
+        showToast(`儲存失敗：${err.message}`, "err");
+      }
+    });
+
+    $("btn-copy-helper-url").addEventListener("click", async () => {
+      const url = new URL(window.location.href);
+      url.search = "?mode=helper";
+      url.hash = "";
+      try {
+        await navigator.clipboard.writeText(url.toString());
+        showToast("已複製學校平板專用網址", "ok");
+      } catch (_) {
+        showToast(`平板連結：${url.toString()}`);
+      }
     });
 
     $("btn-save-roster").addEventListener("click", () => {
@@ -1728,24 +1926,66 @@
       showToast("已清空姓名對照表");
     });
 
-    $("btn-tool-fill-29").addEventListener("click", () => {
+    $("btn-tool-fill-29").addEventListener("click", async () => {
       store.fillTestSeatDemoScores();
+      if (store.getCloudSession().mode === "cloud_teacher") {
+        try {
+          await store.syncReplaceFullState(store.getState());
+        } catch (err) {
+          showToast(`雲端更新失敗：${err.message}`, "err");
+          return;
+        }
+      }
       renderActiveTab();
       showToast("已替 29 號測試座號填入各科測試成績", "ok");
     });
 
-    $("btn-tool-clear-29").addEventListener("click", () => {
+    $("btn-tool-clear-29").addEventListener("click", async () => {
       store.clearTestSeatScores();
+      if (store.getCloudSession().mode === "cloud_teacher") {
+        try {
+          await store.syncReplaceFullState(store.getState());
+        } catch (err) {
+          showToast(`雲端更新失敗：${err.message}`, "err");
+          return;
+        }
+      }
       renderActiveTab();
       showToast("已清除 29 號測試座號成績");
     });
 
-    $("btn-tool-load-demo").addEventListener("click", () => {
+    $("btn-tool-load-demo").addEventListener("click", async () => {
       if (!confirm("將載入 1~29 號示範班級成績（會自動備份現有資料，可隨時復原），是否繼續？")) return;
       store.loadClassDemoData();
+      if (store.getCloudSession().mode === "cloud_teacher") {
+        try {
+          await store.syncReplaceFullState(store.getState());
+        } catch (err) {
+          showToast(`雲端更新失敗：${err.message}`, "err");
+          return;
+        }
+      }
       ui.undoMessage = "已載入全班示範資料（若要回復載入前狀態，可按右側復原）";
       switchTab("overview");
       showToast("已載入 1~29 號示範成績資料", "ok");
+    });
+
+    $("btn-tool-push-local").addEventListener("click", async () => {
+      if (store.getCloudSession().mode !== "cloud_teacher") return;
+      const rawLocal = localStorage.getItem(CFG.STORAGE_KEY);
+      if (!rawLocal) {
+        showToast("找不到本機單機版暫存成績", "err");
+        return;
+      }
+      if (!confirm("確定要把這台電腦「本機單機版」的成績覆蓋上傳到 Supabase 雲端嗎？")) return;
+      try {
+        const parsed = JSON.parse(rawLocal);
+        await store.syncReplaceFullState(parsed);
+        renderActiveTab();
+        showToast("已將本機單機成績同步上傳至雲端", "ok");
+      } catch (err) {
+        showToast(`上傳失敗：${err.message}`, "err");
+      }
     });
 
     $("btn-tool-export-json").addEventListener("click", () => {
@@ -1765,6 +2005,9 @@
       try {
         const text = await file.text();
         store.importBackupJson(text);
+        if (store.getCloudSession().mode === "cloud_teacher") {
+          await store.syncReplaceFullState(store.getState());
+        }
         ui.undoMessage = "剛從 JSON 備份還原資料（可復原為還原前狀態）";
         renderActiveTab();
         showToast("JSON 備份還原成功", "ok");
@@ -1774,9 +2017,17 @@
       e.target.value = "";
     });
 
-    $("btn-tool-reset-all").addEventListener("click", () => {
+    $("btn-tool-reset-all").addEventListener("click", async () => {
       if (!confirm("確定要清空全部學生成績與評量嗎？（系統仍會保留一次復原快照）")) return;
       store.resetAllData();
+      if (store.getCloudSession().mode === "cloud_teacher") {
+        try {
+          await store.syncReplaceFullState(store.getState());
+        } catch (err) {
+          showToast(`雲端重置失敗：${err.message}`, "err");
+          return;
+        }
+      }
       ui.undoMessage = "剛清空全部資料（如誤按可立即點擊右側復原）";
       renderActiveTab();
       showToast("已重置為空白成績冊");
@@ -1787,6 +2038,126 @@
         closeModal();
       }
     });
+
+    // 登入畫面事件
+    $("auth-mode-tabs").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-auth-mode]");
+      if (!btn) return;
+      selectAuthMode(btn.dataset.authMode);
+    });
+
+    $("teacher-login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const pw = $("input-teacher-pw").value;
+      const remember = $("chk-remember-pw").checked;
+      const btn = $("btn-teacher-login");
+      $("login-error").classList.add("hidden");
+      btn.disabled = true;
+      btn.textContent = "連線驗證中…";
+      try {
+        await store.connectCloudTeacher(pw, remember);
+        $("input-teacher-pw").value = "";
+        showAppView();
+        showToast("已連線至 Supabase 雲端工作台", "ok");
+      } catch (err) {
+        $("login-error").textContent =
+          err.message === "unauthorized" ? "教師密碼錯誤，請再確認。" : `連線失敗：${err.message}`;
+        $("login-error").classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "登入教師雲端工作台";
+      }
+    });
+
+    $("helper-login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const pin = $("input-helper-pin").value.trim();
+      const btn = $("btn-helper-login");
+      $("login-error").classList.add("hidden");
+      btn.disabled = true;
+      btn.textContent = "連線驗證中…";
+      try {
+        await store.connectCloudHelper(pin);
+        $("input-helper-pin").value = "";
+        showAppView();
+        showToast("已進入學校平板協助登打模式", "ok");
+      } catch (err) {
+        $("login-error").textContent =
+          err.message === "unauthorized"
+            ? "通行碼錯誤，或老師目前尚未開放平板登打。"
+            : `連線失敗：${err.message}`;
+        $("login-error").classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "進入學生協助登打模式";
+      }
+    });
+
+    $("btn-enter-local").addEventListener("click", () => {
+      store.enterLocalMode();
+      showAppView();
+      showToast("已進入本機單機模式（資料僅存於此瀏覽器）");
+    });
+  }
+
+  function selectAuthMode(mode) {
+    ui.authTab = mode === "helper" ? "helper" : "teacher";
+    document.querySelectorAll("#auth-mode-tabs .seg-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.authMode === ui.authTab);
+    });
+    $("teacher-login-form").classList.toggle("hidden", ui.authTab !== "teacher");
+    $("helper-login-form").classList.toggle("hidden", ui.authTab !== "helper");
+    $("login-error").classList.add("hidden");
+  }
+
+  function startAutoPolling() {
+    stopAutoPolling();
+    if (!isCloudMode()) return;
+    ui.pollTimerId = setInterval(async () => {
+      if (document.visibilityState !== "visible") return;
+      if (ui.pendingSaves > 0) return;
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag === "INPUT" || activeTag === "TEXTAREA" || activeTag === "SELECT") return;
+      if (!$("modal-backdrop").classList.contains("hidden")) return;
+      try {
+        const changed = await store.syncFromCloud();
+        if (changed) {
+          renderActiveTab();
+        } else {
+          updateSyncPill(store.getSyncMeta());
+        }
+      } catch (_) {
+        // onRevoked / status badge handles errors cleanly
+      }
+    }, 5000);
+  }
+
+  function stopAutoPolling() {
+    if (ui.pollTimerId) {
+      clearInterval(ui.pollTimerId);
+      ui.pollTimerId = null;
+    }
+  }
+
+  function showAuthView(preferredMode = "teacher", errMsg = "") {
+    stopAutoPolling();
+    $("app-header").classList.add("hidden");
+    $("app-main").classList.add("hidden");
+    $("auth-section").classList.remove("hidden");
+    selectAuthMode(preferredMode);
+    if (errMsg) {
+      $("login-error").textContent = errMsg;
+      $("login-error").classList.remove("hidden");
+    }
+  }
+
+  function showAppView() {
+    $("auth-section").classList.add("hidden");
+    $("app-header").classList.remove("hidden");
+    $("app-main").classList.remove("hidden");
+    ui.activeTab = "entry";
+    switchTab("entry");
+    startAutoPolling();
   }
 
   async function handleUploadedCsvFile(file) {
@@ -1801,6 +2172,43 @@
     }
   }
 
-  bindEvents();
-  renderActiveTab();
+  async function bootstrap() {
+    store.setSyncCallbacks({
+      onStatus: (meta) => updateSyncPill(meta),
+      onRevoked: () => {
+        const wasHelper = store.getCloudSession().mode === "cloud_helper";
+        store.disconnectCloud();
+        showAuthView(
+          wasHelper ? "helper" : "teacher",
+          wasHelper ? "平板通行碼已被老師關閉或更換，請重新確認通行碼。" : "教師驗證已失效，請重新登入。",
+        );
+      },
+    });
+
+    bindEvents();
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mode") === "helper") {
+      showAuthView("helper");
+      $("input-helper-pin").focus();
+      return;
+    }
+
+    const saved = store.loadSavedAuth();
+    if (saved && saved.mode === "cloud_teacher" && saved.pw) {
+      try {
+        await store.connectCloudTeacher(saved.pw, true);
+        showAppView();
+        return;
+      } catch (_) {
+        store.disconnectCloud();
+        showAuthView("teacher", "自動登入失敗，請重新輸入教師密碼或先使用單機模式。");
+        return;
+      }
+    }
+
+    showAuthView("teacher");
+  }
+
+  bootstrap();
 })();

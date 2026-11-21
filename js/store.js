@@ -97,6 +97,7 @@
       hideNames: Boolean(raw.hideNames),
       absentMode: raw.absentMode === "zero" ? "zero" : "exclude",
       studentHelperMode: Boolean(raw.studentHelperMode),
+      helperEnabled: raw.helperEnabled !== undefined ? Boolean(raw.helperEnabled) : base.helperEnabled,
       helperPin: typeof raw.helperPin === "string" ? raw.helperPin.trim().slice(0, 20) : base.helperPin,
     };
   }
@@ -208,13 +209,92 @@
   function createStore(storageAdapter) {
     const storage = storageAdapter || (typeof localStorage !== "undefined" ? localStorage : null);
     let state = loadFromStorage();
+    let cloudSession = {
+      mode: "local", // "local" | "cloud_teacher" | "cloud_helper"
+      pw: "",
+      helperPin: "",
+      rememberPw: false,
+    };
+    let syncMeta = {
+      status: "idle", // "idle" | "syncing" | "synced" | "error"
+      lastSyncedAt: null,
+      lastError: "",
+    };
+    let onSyncStatusChange = null;
+    let onAuthRevoked = null;
+
+    function notifySyncChange() {
+      if (typeof onSyncStatusChange === "function") {
+        onSyncStatusChange({ ...syncMeta, mode: cloudSession.mode });
+      }
+    }
+
+    function setSyncStatus(status, lastError = "") {
+      syncMeta = {
+        status,
+        lastSyncedAt: status === "synced" ? new Date().toISOString() : syncMeta.lastSyncedAt,
+        lastError,
+      };
+      notifySyncChange();
+    }
+
+    function loadPrivateNames() {
+      if (!storage || !CFG.PRIVATE_NAMES_KEY) return {};
+      try {
+        const raw = storage.getItem(CFG.PRIVATE_NAMES_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function savePrivateNames(namesMap) {
+      if (!storage || !CFG.PRIVATE_NAMES_KEY) return;
+      try {
+        storage.setItem(CFG.PRIVATE_NAMES_KEY, JSON.stringify(namesMap || {}));
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    function loadSavedAuth() {
+      if (!storage || !CFG.AUTH_STORAGE_KEY) return null;
+      try {
+        const raw = storage.getItem(CFG.AUTH_STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function saveAuth(authObj) {
+      if (!storage || !CFG.AUTH_STORAGE_KEY) return;
+      try {
+        if (!authObj) {
+          storage.removeItem(CFG.AUTH_STORAGE_KEY);
+        } else {
+          storage.setItem(CFG.AUTH_STORAGE_KEY, JSON.stringify(authObj));
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
 
     function loadFromStorage() {
       if (!storage) return createDefaultState();
       try {
         const raw = storage.getItem(CFG.STORAGE_KEY);
         if (!raw) return createDefaultState();
-        return normalizeState(JSON.parse(raw));
+        const norm = normalizeState(JSON.parse(raw));
+        const priv = loadPrivateNames();
+        if (Object.keys(priv).length > 0 && Object.keys(norm.names).length === 0) {
+          norm.names = priv;
+        }
+        return norm;
       } catch (err) {
         console.warn("讀取成績本機資料失敗，改用預設資料:", err);
         return createDefaultState();
@@ -223,9 +303,15 @@
 
     function persist() {
       state.updatedAt = new Date().toISOString();
-      if (!storage) return;
+      if (!storage || cloudSession.mode === "cloud_helper") return;
+      if (cloudSession.mode === "cloud_teacher") {
+        // 雲端教師模式下只將私密姓名另存，不動本機單機版成績
+        savePrivateNames(state.names);
+        return;
+      }
       try {
         storage.setItem(CFG.STORAGE_KEY, JSON.stringify(state));
+        savePrivateNames(state.names);
       } catch (err) {
         console.error("儲存成績本機資料失敗:", err);
       }
@@ -954,6 +1040,354 @@
       return state;
     }
 
+    // ==========================================
+    // Supabase 雲端同步引擎
+    // ==========================================
+    async function callCloudApi(action, payload = {}, overrideSession = null) {
+      const sess = overrideSession || cloudSession;
+      if (!CFG.SUPABASE_URL || !CFG.FUNCTION_NAME || !CFG.SUPABASE_PUBLISHABLE_KEY) {
+        throw new Error("未設定 Supabase 連線資訊");
+      }
+      const endpoint = `${CFG.SUPABASE_URL}/functions/v1/${CFG.FUNCTION_NAME}`;
+      const bodyPayload = {
+        action,
+        ...payload,
+      };
+      if (sess.pw) bodyPayload.pw = sess.pw;
+      if (sess.helperPin) bodyPayload.helper_pin = sess.helperPin;
+
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: CFG.SUPABASE_PUBLISHABLE_KEY,
+          Authorization: `Bearer ${CFG.SUPABASE_PUBLISHABLE_KEY}`,
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+
+      let data = null;
+      try {
+        data = await resp.json();
+      } catch (_) {
+        data = {};
+      }
+
+      if (!resp.ok) {
+        const errMsg = data?.error || `HTTP ${resp.status}`;
+        if (resp.status === 401 && sess === cloudSession && cloudSession.mode !== "local") {
+          if (typeof onAuthRevoked === "function") {
+            onAuthRevoked(errMsg);
+          }
+        }
+        const err = new Error(errMsg);
+        err.status = resp.status;
+        throw err;
+      }
+      return data;
+    }
+
+    function applyCloudPayload(data) {
+      const isHelper = cloudSession.mode === "cloud_helper" || data.role === "helper";
+      const prevHideNames = Boolean(state.settings.hideNames);
+      const nextSettings = mergeSettings({
+        ...(data.settings || {}),
+        hideNames: isHelper ? true : prevHideNames,
+        studentHelperMode: isHelper || Boolean(state.settings.studentHelperMode && cloudSession.mode === "cloud_teacher"),
+      });
+      const nextAssessments = Array.isArray(data.assessments)
+        ? data.assessments.map((a, idx) => sanitizeAssessment(a, idx)).filter(Boolean)
+        : createStarterAssessments();
+
+      const names = isHelper ? {} : loadPrivateNames();
+      state = {
+        version: 2,
+        settings: nextSettings,
+        names,
+        assessments: nextAssessments,
+        updatedAt: data.serverTime || new Date().toISOString(),
+      };
+    }
+
+    async function connectCloudTeacher(pw, rememberPw = false) {
+      const cleanPw = String(pw || "");
+      if (!cleanPw) throw new Error("請輸入教師密碼");
+      setSyncStatus("syncing");
+      try {
+        const tempSess = { mode: "cloud_teacher", pw: cleanPw, helperPin: "" };
+        const data = await callCloudApi("get_state", {}, tempSess);
+        cloudSession = { mode: "cloud_teacher", pw: cleanPw, helperPin: "", rememberPw: Boolean(rememberPw) };
+        if (rememberPw) {
+          saveAuth({ mode: "cloud_teacher", pw: cleanPw });
+        } else {
+          saveAuth(null);
+        }
+        applyCloudPayload(data);
+        setSyncStatus("synced");
+        return state;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function connectCloudHelper(helperPin) {
+      const cleanPin = String(helperPin || "").trim();
+      if (!cleanPin) throw new Error("請輸入平板協助通行碼");
+      setSyncStatus("syncing");
+      try {
+        const tempSess = { mode: "cloud_helper", pw: "", helperPin: cleanPin };
+        const data = await callCloudApi("helper_get_state", {}, tempSess);
+        cloudSession = { mode: "cloud_helper", pw: "", helperPin: cleanPin, rememberPw: false };
+        applyCloudPayload(data);
+        setSyncStatus("synced");
+        return state;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    function enterLocalMode() {
+      cloudSession = { mode: "local", pw: "", helperPin: "", rememberPw: false };
+      state = loadFromStorage();
+      setSyncStatus("idle");
+      return state;
+    }
+
+    function disconnectCloud() {
+      cloudSession = { mode: "local", pw: "", helperPin: "", rememberPw: false };
+      saveAuth(null);
+      setSyncStatus("idle");
+    }
+
+    async function syncFromCloud() {
+      if (cloudSession.mode === "local") return false;
+      setSyncStatus("syncing");
+      try {
+        const action = cloudSession.mode === "cloud_helper" ? "helper_get_state" : "get_state";
+        const data = await callCloudApi(action, {});
+        const beforeStr = JSON.stringify({ s: state.settings, a: state.assessments });
+        applyCloudPayload(data);
+        const afterStr = JSON.stringify({ s: state.settings, a: state.assessments });
+        setSyncStatus("synced");
+        return beforeStr !== afterStr;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncSetScore(assessmentId, seat, rawValue) {
+      const item = state.assessments.find((a) => a.id === assessmentId);
+      const cleanSeat = clampSeat(seat, state.settings.maxSeat);
+      if (!item || !cleanSeat) return { valid: false, error: "無效的評量或座號" };
+      if (item.locked) return { valid: false, error: "此欄位已鎖定，請先解除鎖定" };
+
+      const parsed = parseCellInput(rawValue, item.maxScore);
+      if (!parsed.valid) return parsed;
+
+      if (cloudSession.mode === "local") {
+        return setScore(assessmentId, seat, rawValue);
+      }
+
+      const prevVal = item.scores[String(cleanSeat)];
+      if (parsed.value === null) delete item.scores[String(cleanSeat)];
+      else item.scores[String(cleanSeat)] = parsed.value;
+
+      setSyncStatus("syncing");
+      try {
+        const action = cloudSession.mode === "cloud_helper" ? "helper_set_score" : "set_score";
+        await callCloudApi(action, { assessmentId, seat: cleanSeat, value: parsed.value });
+        setSyncStatus("synced");
+        return { valid: true, value: parsed.value };
+      } catch (err) {
+        // 還原本地樂觀更新，並從雲端拉最新狀態
+        if (prevVal === undefined) delete item.scores[String(cleanSeat)];
+        else item.scores[String(cleanSeat)] = prevVal;
+        setSyncStatus("error", err.message);
+        try {
+          await syncFromCloud();
+        } catch (_) {
+          // ignore
+        }
+        return { valid: false, error: `雲端儲存失敗：${err.message}` };
+      }
+    }
+
+    async function syncAddAssessment({ subjectId, category, title, date = "", maxScore = 100 }) {
+      if (cloudSession.mode === "local") {
+        return addAssessment({ subjectId, category, title, date, maxScore });
+      }
+      setSyncStatus("syncing");
+      try {
+        const action = cloudSession.mode === "cloud_helper" ? "helper_add_assessment" : "add_assessment";
+        const data = await callCloudApi(action, { subjectId, category, title, date, maxScore });
+        const norm = sanitizeAssessment(data.assessment, state.assessments.length);
+        if (norm) state.assessments.push(norm);
+        setSyncStatus("synced");
+        return norm;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncSetLocked(assessmentId, locked) {
+      if (cloudSession.mode === "local") return setAssessmentLocked(assessmentId, locked);
+      if (cloudSession.mode === "cloud_helper") return null;
+      setSyncStatus("syncing");
+      try {
+        await callCloudApi("set_locked", { assessmentId, locked: Boolean(locked) });
+        const item = state.assessments.find((a) => a.id === assessmentId);
+        if (item) item.locked = Boolean(locked);
+        setSyncStatus("synced");
+        return item;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncUpdateAssessment(assessmentId, patch) {
+      if (cloudSession.mode === "local") return updateAssessment(assessmentId, patch);
+      if (cloudSession.mode === "cloud_helper") return null;
+      setSyncStatus("syncing");
+      try {
+        await callCloudApi("update_assessment", { assessmentId, ...patch });
+        await syncFromCloud();
+        return state.assessments.find((a) => a.id === assessmentId) || null;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncDeleteAssessment(assessmentId) {
+      if (cloudSession.mode === "local") return deleteAssessment(assessmentId);
+      if (cloudSession.mode === "cloud_helper") return false;
+      setSyncStatus("syncing");
+      try {
+        await callCloudApi("delete_assessment", { assessmentId });
+        state.assessments = state.assessments.filter((a) => a.id !== assessmentId);
+        setSyncStatus("synced");
+        return true;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncSetNote(assessmentId, seat, noteText) {
+      if (cloudSession.mode === "local") return setNote(assessmentId, seat, noteText);
+      if (cloudSession.mode === "cloud_helper") return false;
+      setSyncStatus("syncing");
+      try {
+        await callCloudApi("set_note", { assessmentId, seat, note: noteText });
+        const item = state.assessments.find((a) => a.id === assessmentId);
+        if (item) {
+          const clean = String(noteText || "").trim().slice(0, 120);
+          if (!clean) delete item.notes[String(seat)];
+          else item.notes[String(seat)] = clean;
+        }
+        setSyncStatus("synced");
+        return true;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncBulkAdjust(assessmentId, mode, delta = 0) {
+      if (cloudSession.mode === "local") return bulkAdjustAssessment(assessmentId, mode, delta);
+      if (cloudSession.mode === "cloud_helper") return 0;
+      setSyncStatus("syncing");
+      try {
+        const res = await callCloudApi("bulk_adjust", { assessmentId, mode, delta });
+        await syncFromCloud();
+        return res.changed ?? 1;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncUpdateSettings(partial) {
+      if (cloudSession.mode === "local") return updateSettings(partial);
+      if (cloudSession.mode === "cloud_helper") return state.settings;
+      // hideNames 屬於本機投影防窺偏好，僅本地保留
+      if (Object.keys(partial).length === 1 && partial.hideNames !== undefined) {
+        state.settings.hideNames = Boolean(partial.hideNames);
+        return state.settings;
+      }
+      setSyncStatus("syncing");
+      try {
+        const data = await callCloudApi("update_settings", partial);
+        applyCloudPayload(data);
+        setSyncStatus("synced");
+        return state.settings;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncImportOperations(operations, options = {}) {
+      if (cloudSession.mode === "local") return applyImportOperations(operations, options);
+      if (cloudSession.mode === "cloud_helper") {
+        throw new Error("學生協助模式下無法匯入 CSV");
+      }
+      savePreImportSnapshot("雲端 CSV 匯入前備份");
+      setSyncStatus("syncing");
+      try {
+        const data = await callCloudApi("import_operations", {
+          operations,
+          overwriteExisting: options.overwriteExisting !== false,
+          includeTestSeats: options.includeTestSeats !== false,
+        });
+        applyCloudPayload(data);
+        setSyncStatus("synced");
+        return {
+          addedCount: data.addedCount || 0,
+          updatedCount: data.updatedCount || 0,
+          skippedCount: data.skippedCount || 0,
+          createdAssessments: data.createdAssessments || 0,
+        };
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    async function syncReplaceFullState(nextStateObj) {
+      if (cloudSession.mode !== "cloud_teacher") {
+        throw new Error("需以教師雲端模式登入才能同步整份資料");
+      }
+      setSyncStatus("syncing");
+      try {
+        const data = await callCloudApi("replace_full_state", { state: nextStateObj });
+        applyCloudPayload(data);
+        setSyncStatus("synced");
+        return state;
+      } catch (err) {
+        setSyncStatus("error", err.message);
+        throw err;
+      }
+    }
+
+    function getCloudSession() {
+      return { mode: cloudSession.mode, rememberPw: cloudSession.rememberPw };
+    }
+
+    function getSyncMeta() {
+      return { ...syncMeta, mode: cloudSession.mode };
+    }
+
+    function setSyncCallbacks({ onStatus, onRevoked } = {}) {
+      onSyncStatusChange = onStatus || null;
+      onAuthRevoked = onRevoked || null;
+    }
+
     return {
       getState,
       getSeats,
@@ -992,6 +1426,26 @@
       exportBackupJson,
       importBackupJson,
       round1,
+      // Cloud APIs
+      loadSavedAuth,
+      connectCloudTeacher,
+      connectCloudHelper,
+      enterLocalMode,
+      disconnectCloud,
+      syncFromCloud,
+      syncSetScore,
+      syncAddAssessment,
+      syncSetLocked,
+      syncUpdateAssessment,
+      syncDeleteAssessment,
+      syncSetNote,
+      syncBulkAdjust,
+      syncUpdateSettings,
+      syncImportOperations,
+      syncReplaceFullState,
+      getCloudSession,
+      getSyncMeta,
+      setSyncCallbacks,
     };
   }
 

@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="css/styles.css" />
 </head>
 <body>
-  <header class="app-header">
+  <header id="app-header" class="app-header hidden">
     <div class="header-inner">
       <div class="brand">
         <span class="app-glyph" aria-hidden="true">
@@ -22,21 +22,95 @@
             <h1>學生成績管理系統</h1>
             <span id="hdr-class-badge" class="badge badge-blue">402 班</span>
             <span id="hdr-seat-badge" class="badge badge-neutral">1~29 號（29 號為測試座號）</span>
+            <span id="hdr-sync-pill" class="badge badge-ok">☁️ 雲端同步</span>
           </div>
-          <div id="hdr-semester-sub" class="brand-sub">115 學年度第 1 學期 · 本機即時儲存</div>
+          <div id="hdr-semester-sub" class="brand-sub">115 學年度第 1 學期 · 雲端跨裝置同步</div>
         </div>
       </div>
 
       <div class="hdr-actions">
+        <button id="btn-sync-now" type="button" class="btn btn-secondary btn-sm">🔄 立即同步</button>
         <button id="btn-enter-helper-mode" type="button" class="btn btn-secondary btn-sm">👩‍🎓 學生協助模式</button>
         <button id="btn-toggle-privacy" type="button" class="btn btn-secondary btn-sm">👁️ 隱藏姓名</button>
         <button id="btn-quick-import" type="button" class="btn btn-soft btn-sm">⬆️ CSV 上傳</button>
         <button id="btn-quick-export" type="button" class="btn btn-primary btn-sm">⬇️ CSV 匯出</button>
+        <button id="btn-logout" type="button" class="btn btn-secondary btn-sm">登出</button>
       </div>
     </div>
   </header>
 
-  <main class="main-container">
+  <!-- 登入與模式選擇畫面 -->
+  <section id="auth-section" class="auth-wrap">
+    <div class="card login-card">
+      <div class="login-app-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+          <path d="M9 8h6M9 12h4" />
+        </svg>
+      </div>
+      <h2>學生成績管理系統</h2>
+      <p class="login-desc">
+        雲端僅存座號與成績，不存學生姓名；支援學校平板與教師電腦即時同步。
+      </p>
+
+      <div class="seg-filter auth-mode-tabs" id="auth-mode-tabs">
+        <button type="button" class="seg-btn active" data-auth-mode="teacher">👩‍🏫 教師雲端登入</button>
+        <button type="button" class="seg-btn" data-auth-mode="helper">👩‍🎓 平板小老師登打</button>
+      </div>
+
+      <form id="teacher-login-form" class="auth-form">
+        <div class="field-group" style="text-align:left;">
+          <label class="field-label" for="input-teacher-pw">教師密碼</label>
+          <input
+            id="input-teacher-pw"
+            class="input-text"
+            type="password"
+            autocomplete="current-password"
+            placeholder="輸入既有 Supabase 教師後台密碼"
+            required
+          />
+        </div>
+        <label class="checkbox-row">
+          <input id="chk-remember-pw" type="checkbox" checked />
+          <span>在此裝置記住密碼（學校共用平板請勿勾選）</span>
+        </label>
+        <button id="btn-teacher-login" type="submit" class="btn btn-primary btn-block">
+          登入教師雲端工作台
+        </button>
+      </form>
+
+      <form id="helper-login-form" class="auth-form hidden">
+        <div class="helper-login-tip">
+          平板專用的安全登打模式：僅開放<strong>選擇科目、新增考試項目、輸入未鎖定欄位成績</strong>，無法看到姓名或修改設定。
+        </div>
+        <div class="field-group" style="text-align:left;">
+          <label class="field-label" for="input-helper-pin">平板協助通行碼</label>
+          <input
+            id="input-helper-pin"
+            class="input-text"
+            type="password"
+            inputmode="numeric"
+            autocomplete="off"
+            placeholder="輸入老師設定的通行碼（預設 4020）"
+            required
+          />
+        </div>
+        <button id="btn-helper-login" type="submit" class="btn btn-primary btn-block">
+          進入學生協助登打模式
+        </button>
+      </form>
+
+      <div id="login-error" class="err-banner hidden"></div>
+
+      <div class="divider-or">或</div>
+      <button id="btn-enter-local" type="button" class="btn btn-secondary btn-block">
+        先用本機單機模式（不連雲端，僅存此瀏覽器）
+      </button>
+    </div>
+  </section>
+
+  <main id="app-main" class="main-container hidden">
     <div id="helper-mode-banner" class="helper-banner hidden no-print">
       <div>
         <strong>👩‍🎓 學生協助登打模式中</strong>
@@ -339,12 +413,19 @@
               </select>
             </div>
             <div class="field-group">
-              <label class="field-label" for="set-helper-pin">學生協助模式解除密碼（預設 4020）</label>
-              <input id="set-helper-pin" type="text" class="input-text" placeholder="留白則不設密碼" />
+              <label class="field-label" for="set-helper-pin">平板／協助模式通行碼（預設 4020）</label>
+              <input id="set-helper-pin" type="text" class="input-text" placeholder="例如：4020" />
+            </div>
+            <div class="field-group" style="grid-column: 1 / -1;">
+              <label class="toggle-chip" style="align-self:flex-start;">
+                <input type="checkbox" id="set-helper-enabled" checked />
+                <span>開放學校平板以通行碼登入協助登打（關閉後平板會立即登出）</span>
+              </label>
             </div>
           </div>
-          <div style="margin-top: 14px;">
+          <div style="margin-top: 14px; display:flex; gap:8px; flex-wrap:wrap;">
             <button id="btn-save-basic-settings" type="button" class="btn btn-primary">儲存基本設定</button>
+            <button id="btn-copy-helper-url" type="button" class="btn btn-soft">📋 複製學校平板專用連結</button>
           </div>
         </div>
 
@@ -372,6 +453,7 @@
           <button id="btn-tool-fill-29" type="button" class="btn btn-secondary">🧪 幫 29 號填入測試成績</button>
           <button id="btn-tool-clear-29" type="button" class="btn btn-secondary">🧹 清除 29 號成績</button>
           <button id="btn-tool-load-demo" type="button" class="btn btn-soft">✨ 載入示範班級資料</button>
+          <button id="btn-tool-push-local" type="button" class="btn btn-soft hidden">📤 將本機單機資料覆蓋上傳至雲端</button>
           <button id="btn-tool-export-json" type="button" class="btn btn-secondary">💾 匯出 JSON 備份</button>
           <button id="btn-tool-import-json" type="button" class="btn btn-secondary">📂 還原 JSON 備份</button>
           <input id="json-backup-input" type="file" accept=".json,application/json" class="hidden" />

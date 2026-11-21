@@ -1274,6 +1274,120 @@ kbd {
   background: #b91c1c;
 }
 
+/* 登入畫面 */
+.auth-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 430px;
+  border-radius: 22px;
+  padding: 28px 26px;
+  text-align: center;
+}
+
+.login-app-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 12px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #0071e3, #3b9eff);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 20px rgba(0, 113, 227, 0.25);
+}
+
+.login-app-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.login-card h2 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.login-desc {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 16px;
+}
+
+.auth-mode-tabs {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.auth-mode-tabs .seg-btn {
+  flex: 1;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  text-align: left;
+}
+
+.checkbox-row input {
+  accent-color: var(--accent);
+}
+
+.helper-login-tip {
+  text-align: left;
+  font-size: 0.82rem;
+  color: #7a3600;
+  background: #fff4e5;
+  border: 1px solid rgba(178, 80, 0, 0.22);
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+}
+
+.err-banner {
+  margin-top: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bad-tint);
+  color: var(--bad);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.divider-or {
+  margin: 16px 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.divider-or::before,
+.divider-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--separator);
+}
+
 /* RWD */
 @media (max-width: 1024px) {
   .kpi-grid {

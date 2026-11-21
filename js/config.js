@@ -1,6 +1,11 @@
 // 學生成績管理系統設定常數與科目／類別定義
 window.GRADE_CONFIG = {
+  SUPABASE_URL: "https://ppdgubracsneozahujxl.supabase.co",
+  SUPABASE_PUBLISHABLE_KEY: "sb_publishable_4_8Lj3idSkZ0z74V4AIpRA_qqyEicMd",
+  FUNCTION_NAME: "grade-sync",
   STORAGE_KEY: "grade_manager_v1_state",
+  PRIVATE_NAMES_KEY: "grade_manager_v1_private_names",
+  AUTH_STORAGE_KEY: "grade_manager_v1_auth",
   BACKUP_SNAPSHOT_KEY: "grade_manager_v1_pre_import_snapshot",
 
   DEFAULT_SETTINGS: {
@@ -13,6 +18,7 @@ window.GRADE_CONFIG = {
     hideNames: false,
     absentMode: "exclude", // "exclude" | "zero"
     studentHelperMode: false,
+    helperEnabled: true,
     helperPin: "4020",
   },
 
